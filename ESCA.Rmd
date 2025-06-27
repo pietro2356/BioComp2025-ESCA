@@ -1,0 +1,682 @@
+---
+title: "Progetto di biologia computazionale, ESCA squamoso vs adenocarcinoma"
+author: "Eva Jovanovska, Lara Baggio, Sofia paiusco, Pietro Rocchio"
+output:
+  pdf_document: default
+  html_document:
+    df_print: paged
+---
+
+# Librerie
+
+## Installazione librerie specifiche e pacchetti
+
+```{r}
+if (!requireNamespace("BiocManager", quietly = TRUE))
+  install.packages("BiocManager")
+BiocManager::install("recount")
+BiocManager::install("DESeq2")
+BiocManager::install("clusterProfiler")
+BiocManager::install("org.Hs.eg.db")
+
+BiocManager::install("enrichplot")
+
+BiocManager::install("limma")
+
+BiocManager::install("recount3")
+BiocManager::install("EnhancedVolcano")
+BiocManager::install("ReactomePA",INSTALL_opts = '--no-lock')
+
+install.packages('ashr')
+install.packages('class')
+```
+
+## Import librerie specifiche
+
+```{r}
+library("recount3")       # per accedere ai dati RNA-Seq normalizzati --
+library("recount")
+library("DESeq2")         # per DESeq2
+library("ggplot2")        # per PCA
+library("pheatmap")       # per heatmap
+library("clusterProfiler")  # per clustering
+library("org.Hs.eg.db")   # per Enrichment Analyses
+library("ReactomePA")     # per Enrichment Analyses --
+library("enrichplot")     # per GSEA
+library(SummarizedExperiment)
+library(EnhancedVolcano) -- 
+library(class)
+library("limma")
+```
+
+# Progetto TGCA-ESCA: Carcinoma esofageo
+
+## Ottenimento dataset
+
+Scarichiamo il dataset per il progetto ESCA ed effettuiamo un primo filtraggio
+
+```{r}
+rse <- recount3::create_rse_manual(
+  project = "ESCA",
+  project_home = "data_sources/tcga",
+  organism = "human",
+  annotation = "gencode_v29",
+  type = "gene",
+  recount3_url = "https://recount-opendata.s3.amazonaws.com/recount3/release"
+)
+rse <- rse[, rse$tcga.cgc_sample_sample_type == "Primary Tumor" & !is.na(rse$tcga.cgc_sample_sample_type)]
+```
+
+# Analisi PCA (Principal Component Analysis)
+
+La PCA è una tecnica di riduzione dimensionale che identifica le componenti principali (PC1, PC2, ecc.) che catturano la massima variabilità nei dati.
+
+## Filtriamo il dataset
+
+Vogliamo filtrare il dataset per le tipologie istologiche `Esophagus Squamous Cell Carcinoma` e `Esophagus Adenocarcinoma, NOS` presenti nella colonna `tcga.xml_primary_pathology_histological_type`.
+
+```{r}
+rse <- rse[, !is.na(rse[["tcga.xml_primary_pathology_histological_type"]])]
+
+# Create a DESeqDataSet object
+dds <- DESeqDataSet(rse, design = ~tcga.xml_primary_pathology_histological_type)
+
+# Pre-filtering
+keep <- rowSums(counts(dds)) >= 1
+dds <- dds[keep, ]
+
+# Create VST
+vsd <- vst(dds, blind = FALSE)
+```
+
+## Grafico PCA
+
+Una volta organizzati i dati necessari possiamo creare i dati specifici per il grafico della PCA e successivamente salvarlo come PDF.
+
+```{r}
+pcaData <- plotPCA(vsd, intgroup = "tcga.xml_primary_pathology_histological_type", returnData = TRUE)
+percentVar <- round(100 * attr(pcaData, "percentVar"))
+
+# Creiamo il grafico PCA e lo stampiamo
+pcaPlot <- ggplot(pcaData, aes(x = PC1, y = PC2, color = tcga.xml_primary_pathology_histological_type)) +
+  geom_point(size = 3, alpha = 0.8) +
+  xlab(paste0("PC1: ", percentVar[1], "%")) +
+  ylab(paste0("PC2: ", percentVar[2], "%")) +
+  ggtitle("PCA: Squamous Cell vs Adenocarcinoma") +
+  theme_minimal() +
+  scale_color_brewer(palette = "Set1", name = "Tipo Istologico")
+pcaPlot
+
+# Salviamo il grafico della PCA in PDF
+pdf("./graph/01-PCA-SquamousVSAdenocarcinoma.pdf", width = 8, height = 6)
+pcaPlot
+dev.off()
+
+```
+
+## Intgerpretazione grafico PCA
+
+### Informazioni generali
+
+Le componenti principali visualizzate mostrano:
+
+-   *PC1 (asse X):* spiega il **47% della varianza**
+-   *PC2 (asse Y):* spiega il **13% della varianza**
+
+Il totale varianza spiegata da **PC1 + PC2: 60%** – un buon livello per esplorazione biologica.
+
+### Lettura del grafico
+
+Come possiamo leggere dal grafico ogni punto rappresenta un campione tumorale, in particolare le due tipologie sono evidenziate con i seguenti colori:
+
+-   🔴 Esophagus Adenocarcinoma, NOS
+-   🔵 Esophagus Squamous Cell Carcinoma
+
+### Osservazioni biologiche e tecniche
+
+C'è una buona separazione lungo PC1 tra:
+
+-   Adenocarcinomi (a destra)
+-   Carcinomi squamosi (a sinistra)
+
+Questo ci suggerisce che le principali differenze trascrittomiche tra i due sottotipi sono catturate efficacemente da PC1.
+
+**Ciò vuol dire che i due sottotipi hanno profili di espressione genica distinti**, coerenti con le loro origini cellulari diverse.
+
+# Analisi differenziale con DESeq2
+
+Con l'analisi differenziale tramite DESeq2 vogliamo ottenere:
+
+1.  Il **gene con fold change più alto**
+2.  Il **gene con il p-value più basso**
+3.  Un **countplot** per visualizzare l'espressione di un gene selezionato
+4.  Una **heatmap** dei top geni differenzialmente espressi
+
+## Preparazione e design del DESeqDataSet
+
+```{r}
+nrow(dds)
+keep <- rowSums(counts(dds)) >= 10
+dds <- dds[keep, ]
+nrow(dds)
+
+# Il DESeqDataSet è già stato creato, pertanto lo riutiliziamo
+# Esegui DESeq
+ds <- DESeq(dds)
+
+# Risultati: confronta ESCC contro EAC (di default: livello alfabetico come riferimento → Adenocarcinoma come baseline)
+res <- results(
+  ds,
+  contrast = c(
+    "tcga.xml_primary_pathology_histological_type",
+    "Esophagus Squamous Cell Carcinoma",
+    "Esophagus Adenocarcinoma, NOS"
+  )
+)
+
+resOrdered <- res[order(res$pvalue), ]
+
+summary(res)    # visualizzo un riepilogo dei risultati
+head(res) # visulizzo i primi risultati
+```
+
+## Grafico MA
+
+```{r}
+png("./graph/02-plotMA-squamous_vs_adenocarcinoma.png", width = 900, height = 800)
+plotMA(res, ylim = c(-7, 7), main = "MA plot: Squamous vs Adenocarcinoma")
+dev.off()
+```
+## Highest fold change & lowest p-value
+
+Ora che l'analisi DESeq2 è terminata possiamo iniziare a cercare il gene con il Fold Change più alto e quello con il p-value più basso.
+
+### Gene con fold change più alto
+
+```{r}
+gene_high_fc <- rownames(res)[which.max(res$log2FoldChange)]
+res[gene_high_fc, ]
+
+resFC <- res[order(abs(res$log2FoldChange), decreasing = TRUE), ] # ordino per log2FoldChange in ordine decrescente
+head(resFC, 5) # vissualizzo i 5 più significativi
+```
+
+Dall'a ricerca risulta che il gene con il Fold Change più elevato è: `ENSG00000180663.5`.
+
+L'ID corrisponde al gene: `VN1R3` - [Link Ensembl](https://www.ensembl.org/Homo_sapiens/Gene/Summary?db=core;g=ENSG00000180663;r=16:31807926-31808844;t=ENST00000418822)
+
+### Gene con p-value più basso
+
+```{r}
+gene_low_pval <- rownames(resOrdered)[1]
+res[gene_low_pval, ]
+
+resOrdered <- res[order(res$pvalue), ]    # ordino per lowest p-value
+head(resOrdered, 5)   # vissualizzo i 5 più significativi
+```
+
+Dalla ricerca risulta che il gene con p-value più basso è: `ENSG00000171747.8`.
+
+L'ID corrisponde al gene `LGALS4` [Link Ensembl](https://www.ensembl.org/Homo_sapiens/Gene/Summary?g=ENSG00000171747;r=19:38801671-38812945) ed è il gene statisticamente più significativo
+
+### Countplot per il gene con minor p-value
+
+```{r}
+gene <- which.min(res$padj)
+
+png('./graph/03-smallest_pvalue_counts.png', width = 700, height = 700)
+plotCounts(ds, gene = gene, intgroup = "tcga.xml_primary_pathology_histological_type") #counts for the gene with the smallest p-value
+dev.off()
+```
+
+### Cosa comprendiamo dal countplot
+
+Procediamo all'analisi del countplot e vediamo cosa ci dice riguardo al gene analizzato.
+
+-   Ogni punto rapresenta un paziente
+-   Sull'asse Y troviamo l'espressione genica normalizzata (in scala logaritmica)
+-   Sull'asse X troviamo i due gruppi tumorali analizzati.
+
+#### Osservazioni sul grafico
+
+Il gene `ENSG00000171747.8` è fortemente **sovraespresso nell’adenocarcinoma** rispetto al *carcinoma squamoso*, questo vuol dire che il gene analizzato è un ottimo candidato marker differenziale tra i due sottotipi tumorali.
+
+#### Identità del gene ENSG00000171747.8
+
+Ricercando l'ID del gene sui database genici, troviamo che l'ID corrisponde al gene: ***LGALS4***.
+
+| Proprietà      | Valore               |
+|:---------------|:---------------------|
+| Ensembl ID     | ENSG00000171747      |
+| Simbolo        | LGALS4               |
+| Nome completo  | Galectin-4           |
+| Localizzazione | 19q13.2              |
+| Tipo genico    | Proteina Codificante |
+
+Il gene `LGALS4` serve per codificare una proteina chiamata ***galectina-4*** che fa parte della famiglia delle *galectine*.
+
+Le funzioni principali della **galectina-4** sono:
+
+-   Adesione cellulare
+-   Mantenimento dell'integrità dell'epitelio intestinale
+-   Trasporto di molecole
+-   Immunomodulazione
+
+#### Ruolo della galectina-4 nel cancro
+
+In diversi tipi di cancro (colon, stomaco, esofago), LGALS4 è iperespressa nei tessuti sani o ben differenziati, ma tende a essere silenziata nei tumori squamosi. Infatti dal grafico troviamo un'espressione nettamente inferiore per i *carcinoma squamoso esofageo (ESCC)*.
+
+Mentre come mostra anche il tuo grafico, LGALS4 è fortemente espresso nei casi di *adenocarcinoma esofageo (EAC)*. Questo lo rende un marcatore positivo per EAC e un possibile biomarker differenziale tra EAC e ESCC.
+
+#### Fonti
+
+-   [Ensembl LGALS4](https://www.ensembl.org/Homo_sapiens/Gene/Summary?db=core;g=ENSG00000171747;r=19:38801671-38812945)
+-   [GeneCard LGALS4](https://www.genecards.org/cgi-bin/carddisp.pl?gene=LGALS4)
+-   [NIH LGALS4](https://www.ncbi.nlm.nih.gov/gene/3960)
+-   [Omim LGALS4](https://omim.org/entry/602518)
+
+## Heatmap dei top 20 geni DE
+
+```{r}
+# Prendi i top 20 geni con p-value più basso
+top_genes <- rownames(resOrdered)[1:20]
+
+# Usa trasformazione vst
+vsd <- vst(ds, blind = TRUE)
+
+# Estrai la matrice di espressione
+mat <- assay(vsd)[top_genes, ]
+
+# Scala per riga
+mat_scaled <- t(scale(t(mat)))
+
+# Costruisci annotazioni
+anno <- as.data.frame(colData(vsd)[, "tcga.xml_primary_pathology_histological_type", drop = FALSE])
+
+# Heatmap
+ph <- pheatmap(mat_scaled, annotation_col = anno, 
+         main = "Top 20 DE genes - TCGA ESCA",
+         fontsize_row = 10,
+         fontsize_col = 10,
+         cluster_rows = TRUE,
+         show_rownames = TRUE, 
+         cluster_cols = TRUE,
+         show_colnames = FALSE,
+         color = colorRampPalette(rev(RColorBrewer::brewer.pal(9, "RdBu")))(100))
+
+pdf("./graph/04-heatmap_top20.pdf", width = 20, height = 10)
+ph
+dev.off()
+```
+
+La matrice mostra l’espressione normalizzata e scalata (z-score) dei 20 geni più significativamente differenziali (p-value più basso) tra *ESCC* ed *EAC*.
+
+Le righe rappresentano i geni (in formato Ensembl ID), mentre le colonne rappresentano i campioni (non etichettati individualmente, ma con annotazione di tipo tumorale).
+
+## Volcano plot
+
+```{r}
+res_anno <- rowData(ds)[rownames(res), ]
+res <- cbind(res, gene_name = res_anno[, c("gene_name")])
+res$gene_name
+
+png("./graph/05-volcano_plot.png", width = 900, height = 900)
+EnhancedVolcano(res,
+  lab = res$gene_name,
+  x = "log2FoldChange",
+  y = "pvalue"
+)
+dev.off()
+```
+
+Sull'asse X triviamo il Log₂ fold change che misura quanto un gene è sovra/sotto-espresso tra i due gruppi (ESCC vs EAC).
+
+-   **Valori positivi** → geni più espressi in ESCC
+-   **Valori negativi** → geni più espressi in EAC
+
+Mente sull'asse Y troviamo il –log₁₀(p-value) che misura la significatività statistica
+
+-   **Valori alti** → p-value molto basso (alta significatività)
+
+Il grafico presenta varie zone chiave:
+
+-   🔴 Punti rossi (in alto e molto a sinistra o destra): geni con p-value basso e log₂FC estremo → differenzialmente espressi in modo robusto
+-   🔵 Punti blu: significativi solo per p-value
+-   🟢 Punti verdi: significativi solo per fold change
+-   ⚪ Grigi (NS): non significativi
+
+# Analisi GSEA (Gene Set Enrichment Analysis)
+
+```{r}
+# Rimuovi la versione da ENSEMBL
+res$gene_id <- gsub("\\..*", "", rownames(res))
+
+# Crea il ranked gene list per GSEA
+gene_list <- res$log2FoldChange
+names(gene_list) <- res$gene_id
+gene_list <- sort(gene_list, decreasing = TRUE)
+
+# Esegui GSEA con pathway GO Biological Process
+gsea <- gseGO(geneList = gene_list,
+              OrgDb = org.Hs.eg.db,
+              keyType = "ENSEMBL",
+              ont = "ALL",
+              minGSSize = 10,
+              maxGSSize = 500,
+              pvalueCutoff = 0.05,
+              verbose = FALSE,
+              by = "fgsea")
+
+gsea@result    # visualizzo i risultati
+
+# salvo tutti i risultati su un file
+write.table(as.data.frame(gsea@result),
+            file = "./data/06_GSEA_GO_ALL_results.txt",
+            sep = "\t", row.names = FALSE, quote = FALSE)
+
+gseaPlot <- gseaplot2(gsea, geneSetID = 1)
+gseaPlot
+# plotto il primo gene set arricchito
+pdf("./graph/06-GSEA_plot_top1.pdf", width = 10, height = 6)
+gseaPlot
+dev.off()
+
+```
+
+# Analisi EnrichGO
+
+L'analisi EnrichGO ha come obbiettivo quello di identificare le **funzioni biologiche comuni** tra i geni più significativi.
+
+## Preparazione dei dati
+
+```{r}
+# seleziono i geni differenzialmente espressi(DEGs)
+#sig <- res[which( abs(res[,"log2FoldChange"])>1 & res[,"padj"]<=0.05),]  
+
+# lista dei geni DEGs (list of significant genes)
+sig$ENSEMBL <- sub("\\..*", "", rownames(sig))
+gene_list <- bitr(sig$ENSEMBL, fromType="ENSEMBL",
+                  toType= c("ENSEMBL", "SYMBOL","ENTREZID"),
+                  OrgDb=org.Hs.eg.db)
+length(sig$ENSEMBL)   # per sapere i campioni totali
+nrow(gene_list)       # per sapere quanti campioni sono mappati
+
+# lista di background (universal gene list)
+res$ENSEMBL <- sub("\\..*", "", rownames(res))
+universe_list <- bitr(res$ENSEMBL, fromType="ENSEMBL",
+                      toType=c("ENSEMBL", "SYMBOL","ENTREZID"),
+                      OrgDb=org.Hs.eg.db)
+length(res$ENSEMBL)   # per sapere i campioni totali
+nrow(universe_list)   # per sapere quanti campioni sono mappati
+
+```
+
+## Esecuzione analisi EnrichGO per PB, CC e MF
+
+L'analisi verrà effettuata
+
+```{r}
+# Analizziamo l'arricchimento dei processi biologici
+egoBP <- enrichGO(gene = gene_list$ENTREZID,
+                  OrgDb = org.Hs.eg.db,
+                  universe = universe_list$ENTREZID,
+                  ont = "BP",
+                  pAdjustMethod = "BH",
+                  pvalueCutoff = 0.05)
+
+# Analizziamo l'arricchimento delle componenti cellulari
+egoCC <- enrichGO(gene = gene_list$ENTREZID,
+                  OrgDb = org.Hs.eg.db,
+                  universe = universe_list$ENTREZID,
+                  ont = "CC",
+                  pAdjustMethod = "BH",
+                  pvalueCutoff = 0.05)
+
+# Analizziamo l'arricchimento delle funzioni molecolari
+egoMF <- enrichGO(gene = gene_list$ENTREZID,
+                  OrgDb = org.Hs.eg.db,
+                  universe = universe_list$ENTREZID,
+                  ont = "MF",
+                  pAdjustMethod = "BH",
+                  pvalueCutoff = 0.05)
+
+#CREO UN BARPLOT PER RISULTATO
+egoCC@result
+egoBP@result
+egoMF@result
+
+#CONVERSIONE DEGLI ID 
+egoBP2 <- setReadable(egoBP,OrgDb = org.Hs.eg.db)
+
+#SALVO IN VARIABILE I RISULTATI E METTO TUTTO IN UN FILE TXT
+egoBP2 <- egoBP2@result
+write.table(file="./data/07_BP_enrichment_dataset.txt",
+as.data.frame(egoBP2), sep="\t",row.names=F,quote=F)
+
+pdf("./graph/07-GO_enrichment_barplots.pdf", width = 15, height = 10)
+barplot(egoBP, showCategory = 20,
+        title = "GO Enrichment: Biological Process")
+
+barplot(egoCC, showCategory = 20,
+        title = "GO Enrichment: Cellular Component")
+
+barplot(egoMF, showCategory = 20,
+        title = "GO Enrichment: Molecular Function")
+
+dev.off()
+
+```
+
+## Esportazone dati per REVIGO
+
+```{r}
+BP_rev <- egoBP[, c("ID", "p.adjust")]
+write.table(file = "./data/07_GO_BP_revigo_input.txt",
+            BP_rev,
+            sep = "\t",
+            row.names = FALSE,
+            col.names = FALSE,
+            quote = FALSE)
+
+CC_rev <- egoCC[, c("ID", "p.adjust")]
+write.table(file = "./data/07_GO_CC_revigo_input.txt",
+            CC_rev,
+            sep = "\t",
+            row.names = FALSE,
+            col.names = FALSE,
+            quote = FALSE)
+
+MF_rev <- egoMF[, c("ID", "p.adjust")]
+write.table(file = "./data/07_GO_MF_revigo_input.txt",
+            MF_rev,
+            sep = "\t",
+            row.names = FALSE,
+            col.names = FALSE,
+            quote = FALSE)
+```
+
+## Conversione da ENSEMBL a SYMBOL
+
+```{r}
+sig_genes <- res[which(res$padj < 0.05), ]
+sig_genes$gene_id <- gsub("\\..*", "", rownames(sig_genes))
+sig_gene_ids <- sig_genes$gene_id
+
+gene_conversion <- bitr(sig_gene_ids,
+                        fromType = "ENSEMBL",
+                        toType = "SYMBOL",
+                        OrgDb = org.Hs.eg.db)
+
+# Merge con i risultati GO BP
+ego_annotated_BP <- merge(as.data.frame(egoBP), gene_conversion,
+                       by.x = "geneID", by.y = "ENSEMBL", all.x = TRUE)
+
+ego_annotated_CC <- merge(as.data.frame(egoCC), gene_conversion,
+                       by.x = "geneID", by.y = "ENSEMBL", all.x = TRUE)
+
+ego_annotated_MF <- merge(as.data.frame(egoMF), gene_conversion,
+                       by.x = "geneID", by.y = "ENSEMBL", all.x = TRUE)
+
+write.csv(as.data.frame(ego_annotated_BP), file = "./data/07_GO_enrichment_SYMBOL_BP.csv", row.names = FALSE)
+
+write.csv(as.data.frame(ego_annotated_BP), file = "./data/07_GO_enrichment_SYMBOL_CC.csv", row.names = FALSE)
+
+write.csv(as.data.frame(ego_annotated_BP), file = "./data/07_GO_enrichment_SYMBOL_MF.csv", row.names = FALSE)
+
+```
+
+## Enrichment per pathway Reactome:
+
+```{r}
+egoReactome <- enrichPathway(
+  gene = gene_list$ENTREZID,
+  universe = universe_list$ENTREZID,
+  pvalueCutoff = 0.05,
+  pAdjustMethod = "BH",
+  readable = TRUE  # converte ENTREZID in simboli
+)
+
+# Salviamo i risultati in un file TXT
+write.table(
+  as.data.frame(egoReactome),
+  file = "./data/Reactome_enrichment_results.txt",
+  sep = "\t",
+  row.names = FALSE,
+  quote = FALSE
+)
+
+write.table(gene_list$SYMBOL,
+            file = "./data/Reactome_gene_list.txt",
+            quote = FALSE,
+            row.names = FALSE,
+            col.names = FALSE)
+
+```
+
+# Unsupervised Learning (clustering)
+
+```{r}
+expr_mat <- assay(vsd)
+
+# Filtriamo i 100 geni più variabili (opzionale)
+vars <- apply(expr_mat, 1, var)
+top_genes <- names(sort(vars, decreasing = TRUE))[1:100]
+mat <- expr_mat[top_genes, ]
+
+# Calcola distanza e clustering
+d <- dist(t(mat))  # attenzione: trasposizione → campioni come righe
+hc <- hclust(d)
+
+# visualizzo il dendrogramma in un documento PDF:
+pdf("./graph/08-dendrogramma_cluster.pdf", width = 30, height = 10)
+plot(hc,main = "Clustering gerarchico non supervisionato", cex = 0.5)
+rect.hclust(hc, k = 2, border = "red")
+dev.off()
+
+# confronto con i gruppi
+clusters <- cutree(hc, k = 2)
+table(Cluster = clusters, Subtype = colData(dds)$tcga.xml_primary_pathology_histological_type)
+```
+
+Come si nota dai risultati Il Clouster 2 contiene esclusivamente EAC(Esophagus Adenocarcinoma) con 72, il che lo rende perfettamente specifico. Mentre nel Clouster 1 risulta misto ma sempre dominato da EESC(Esophagus Squamous Cell Carcinoma) con 95 e EAC con 17.
+
+Questo vuol dire che il cloustering ha distinto in maniera abbastanza ottimale i sottotipi tumorali, senza ricorrere alle etichette.
+
+Il Clouster 2 è chiaramente associato a EAC, che possiede un profilo di espressione genica distinto.
+
+I 17 EAC presenti nel Clouster 1 possono esser dovuti a:
+
+-   Campioni marginali o misti
+-   Campioni con caratteristiche molecolari simili a ESCC
+
+Nel grafico risultante vediamo i due clouster principali nei rispettivi rettangoli rossi.
+
+### Esaminiamo i 17 EAC in Cluster 1
+
+```{r}
+colnames(dds)[clusters == 1 & colData(dds)$type == "Esophagus Adenocarcinoma, NOS"]
+```
+
+# Supervised learning: k-NN (k-nearest neighbors):
+
+## Prepariamo i dati
+
+```{r}
+# Riduci dimensionalità: PCA per uso con k-NN
+vsd <- vst(dds, blind = TRUE)
+pca_data <- prcomp(t(assay(vsd)), scale. = TRUE)
+
+# Prendi le prime 10 PC
+x <- pca_data$x[, 1:10]
+
+# Etichette
+y <- as.factor(colData(vsd)$tcga.xml_primary_pathology_histological_type)
+
+# Dividi train/test
+set.seed(42)
+train_idx <- sample(1:nrow(x), size = 0.7 * nrow(x))
+x_train <- x[train_idx, ]
+x_test  <- x[-train_idx, ]
+y_train <- y[train_idx]
+y_test  <- y[-train_idx]
+
+```
+
+## Eseguiamo la k-NN
+
+```{r}
+# k = radice quadrata del numero di campioni
+k <- round(sqrt(nrow(x_train)))
+
+# Classificazione
+y_pred <- knn(train = x_train, test = x_test, cl = y_train, k = k)
+
+# Matrice di confusione
+table(Predicted = y_pred, Actual = y_test)
+
+# Accuracy
+accuracy <- sum(y_pred == y_test) / length(y_test)
+print(paste("Accuracy:", round(accuracy * 100, 2), "%"))
+
+
+df_plot <- data.frame(
+  PC1 = x_test[, 1],
+  PC2 = x_test[, 2],
+  Reale = y_test,
+  Predetto = y_pred
+)
+
+# Visualizziamo il grafico della k-NN
+pdf("./graph/09-linear-regression.pdf", width = 10, height = 7)
+ggplot(df_plot, aes(x = PC1, y = PC2)) +
+  geom_point(aes(color = Reale, shape = Predetto), size = 3, alpha = 0.8) +
+  labs(title = "k-NN – Classificazione su PCA",
+       subtitle = "Colori = etichetta reale | Simboli = etichetta predetta",
+       x = "PC1", y = "PC2") +
+  scale_color_brewer(palette = "Set1") +
+  theme_minimal()
+dev.off()
+```
+
+Il modello k-NN risulta avere un'accuratezza del 98.21% ed è bilanciato su entrambi i gruppi. I dati del progetto sono facilmente classificabili.
+
+Infatti il modello è in grado di distingue molto bene i due sottotipi tumorali basandosi solo sull’espressione genica.
+
+| L’errore (1 solo campione) è probabilmente un caso biologicamente atipico, oppure un campione borderline.
+
+### Grafico k-NN con errori
+
+```{r}
+
+df_plot$Errore <- ifelse(df_plot$Reale == df_plot$Predetto, "Corretto", "Errato")
+
+pdf("./graph/10-linear-regression-with-error.pdf", width = 10, height = 7)
+ggplot(df_plot, aes(x = PC1, y = PC2)) +
+  geom_point(aes(color = Errore, shape = Predetto), size = 3) +
+  facet_wrap(~Reale) +
+  labs(title = "k-NN – Errori di classificazione",
+       x = "PC1", y = "PC2") +
+  scale_color_manual(values = c("Corretto" = "grey30", "Errato" = "red")) +
+  theme_minimal()
+dev.off()
+```
