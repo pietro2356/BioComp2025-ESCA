@@ -147,15 +147,6 @@ I metadati clinici raccolti da TCGA includono:
 
 ---
 
-## Esame
-
-Progetto per l'esame di `Biologia Computazionale [145375]` dell'**Università di Trento** a.a. 2024/2025.
-
-Docenti:
-- **Dassi Erik**
-- **Asnicar Francesco**
-
-
 ## Autori
 
 - ***Eva Jovanovska***
