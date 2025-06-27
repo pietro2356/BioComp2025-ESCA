@@ -142,6 +142,7 @@ I metadati clinici raccolti da TCGA includono:
 - [cBioPortal](https://www.cbioportal.org/study/summary?id=esca_tcga)
 - [GDC Data Portal](https://portal.gdc.cancer.gov/projects/TCGA-ESCA)
 - [UCSC Xena Browser](https://xenabrowser.net)
+- [Cancer Genomics Cloud](https://docs.cancergenomicscloud.org/docs/tcga-data)
 - recount3 e Bioconductor: accesso agli RNA-Seq pre-processati.
 
 ---
