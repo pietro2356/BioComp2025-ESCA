@@ -1,6 +1,6 @@
 ---
 title: "Progetto di biologia computazionale, ESCA squamoso vs adenocarcinoma"
-author: "Eva Jovanovska, Lara Baggio, Sofia paiusco, Pietro Rocchio"
+author: "Eva Jovanovska, Lara Baggio, Sofia Paiusco, Pietro Rocchio"
 output:
   pdf_document: default
   html_document:
@@ -344,6 +344,8 @@ Il grafico presenta varie zone chiave:
 -   🔵 Punti blu: significativi solo per p-value
 -   🟢 Punti verdi: significativi solo per fold change
 -   ⚪ Grigi (NS): non significativi
+
+Troviamo infatti il gene LGALS4 in alto a sinistra nel grafico, questo conferma le analisi svolte precedentemente.
 
 # Analisi GSEA (Gene Set Enrichment Analysis)
 
