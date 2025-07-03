@@ -359,15 +359,13 @@ names(gene_list) <- res$gene_id
 gene_list <- sort(gene_list, decreasing = TRUE)
 
 # Esegui GSEA con pathway GO Biological Process
-gsea <- gseGO(geneList = gene_list,
-              OrgDb = org.Hs.eg.db,
-              keyType = "ENSEMBL",
-              ont = "ALL",
-              minGSSize = 10,
-              maxGSSize = 500,
-              pvalueCutoff = 0.05,
-              verbose = FALSE,
-              by = "fgsea")
+gsea <- gseGO(gene = gene_list,
+                 OrgDb = org.Hs.eg.db,
+                 ont = "ALL",
+                 pAdjustMethod = "none",
+                 pvalueCutoff = 0.05,
+                 keyType = "ENSEMBL",
+                 by= "fgsea")
 
 gsea@result    # visualizzo i risultati
 
